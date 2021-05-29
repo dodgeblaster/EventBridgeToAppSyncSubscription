@@ -1,0 +1,102 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+    back-shared
+
+    Shared resources for AppsyncCoffeeshop backend services to use
+
+Globals:
+    Function:
+        Timeout: 3
+
+Resources:
+    CoffeeshopLayer:
+        Type: AWS::Serverless::LayerVersion
+        Properties:
+            ContentUri: layer/sharedUtils
+            CompatibleRuntimes:
+                - nodejs12.x
+        Metadata:
+            BuildMethod: nodejs12.x
+
+    EventBus:
+        Type: AWS::Events::EventBus
+        Properties:
+            Name: AppsyncCoffeeshop
+
+    ResolverSendEventFunction:
+        Type: AWS::Lambda::Function
+        Properties:
+            Runtime: nodejs12.x
+            Role: !GetAtt LambdaRole.Arn
+            Handler: index.handler
+            Code:
+                ZipFile: !Sub
+                    - |
+                        const aws = require('aws-sdk')
+                        const eventbridge = new aws.EventBridge()
+                        exports.handler = async (event) => {
+                            const params = {
+                                Entries: [
+                                    {
+                                        EventBusName: '${EventBus}',
+                                        Source: event.source,
+                                        DetailType: event.event,
+                                        Time: new Date(),
+                                        Detail: JSON.stringify(event.data)
+                                    }
+                                ]
+                            }
+                            await eventbridge.putEvents(params).promise()
+                            return "Success"
+                        }
+                    - EventBus: !Ref EventBus
+            Description: Send Event Function.
+            TracingConfig:
+                Mode: Active
+
+    LambdaRole:
+        Type: AWS::IAM::Role
+        Properties:
+            RoleName: AppsyncCoffeeshopInfra-lambda-policy
+            AssumeRolePolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                    - Effect: Allow
+                      Action:
+                          - sts:AssumeRole
+                      Principal:
+                          Service:
+                              - lambda.amazonaws.com
+            Policies:
+                - PolicyName: AppsyncCoffeeshopInfra-Events-lambdapolicy
+                  PolicyDocument:
+                      Version: '2012-10-17'
+                      Statement:
+                          - Effect: Allow
+                            Action:
+                                - events:PutEvents
+                            Resource:
+                                - !GetAtt EventBus.Arn
+
+Outputs:
+    EventBusArn:
+        Description: 'The ARN of the event bus'
+        Value: !GetAtt EventBus.Arn
+        Export:
+            Name: AppsyncCoffeeshopEventBusArn
+    EventBusName:
+        Description: 'The name of the event bus'
+        Value: !GetAtt EventBus.Name
+        Export:
+            Name: AppsyncCoffeeshopEventBusName
+    ResolverSendEventFunction:
+        Description: 'The ARN of our Lambda function'
+        Value: !GetAtt ResolverSendEventFunction.Arn
+        Export:
+            Name: AppsyncCoffeeshopResolverEventFunction
+    CoffeeshopLayer:
+        Description: 'The ARN of our Lambda function'
+        Value: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:layer:CoffeeshopLayer
+        Export:
+            Name: CoffeeshopLayer

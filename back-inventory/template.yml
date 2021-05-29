@@ -1,0 +1,273 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+    APIName:
+        Type: String
+
+Resources:
+    # - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    # DB
+    # - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    MyTable:
+        Type: AWS::DynamoDB::Table
+        Properties:
+            TableName: appsync-coffeeshop-admin
+            AttributeDefinitions:
+                - AttributeName: PK
+                  AttributeType: S
+                - AttributeName: SK
+                  AttributeType: S
+            KeySchema:
+                - AttributeName: PK
+                  KeyType: HASH
+                - AttributeName: SK
+                  KeyType: RANGE
+            BillingMode: PAY_PER_REQUEST
+
+    # - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    # Appsync General
+    # - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    AppSyncAPI:
+        Type: AWS::AppSync::GraphQLApi
+        Properties:
+            Name: !Ref APIName
+            AuthenticationType: API_KEY
+
+    AppSyncSchema:
+        Type: AWS::AppSync::GraphQLSchema
+        Properties:
+            ApiId: !GetAtt AppSyncAPI.ApiId
+            Definition: >
+                type Product {
+                    PK: String
+                    SK: String
+                    title: String
+                    price: String
+                    category: String
+                }
+                type Query {
+                    products(PK: String!): [Product]
+                }
+                type Mutation {
+                    create(storeId: String!,title: String!, price: String! category: String!): Product!
+                    remove(PK: String!, SK: String!): Product!
+                }
+    AppSyncAPIKey:
+        Type: AWS::AppSync::ApiKey
+        Properties:
+            ApiId: !GetAtt AppSyncAPI.ApiId
+            Expires: 1627859769
+
+    # - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    # Appsync Datasources
+    # - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    AppSyncDataSourceDynamoDB:
+        Type: AWS::AppSync::DataSource
+        Properties:
+            ApiId: !GetAtt AppSyncAPI.ApiId
+            Name: dynamodb
+            Type: AMAZON_DYNAMODB
+            ServiceRoleArn: !GetAtt RoleAppSyncDynamoDB.Arn
+            DynamoDBConfig:
+                TableName: !Ref MyTable
+                AwsRegion: !Sub ${AWS::Region}
+
+    AppSyncDataSourceEventsLambda:
+        Type: AWS::AppSync::DataSource
+        Properties:
+            ApiId: !GetAtt AppSyncAPI.ApiId
+            Name: eventsLambda
+            Type: AWS_LAMBDA
+            ServiceRoleArn: !GetAtt RoleAppSyncEventLambda.Arn
+            LambdaConfig:
+                LambdaFunctionArn: !ImportValue AppsyncCoffeeshopResolverEventFunction
+
+    # - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    # Appsync Datasource Permissions
+    # - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    RoleAppSyncDynamoDB:
+        Type: AWS::IAM::Role
+        Properties:
+            RoleName: !Sub ${APIName}-dynamodb-policy
+            AssumeRolePolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                    - Effect: Allow
+                      Action:
+                          - sts:AssumeRole
+                      Principal:
+                          Service:
+                              - appsync.amazonaws.com
+            Policies:
+                - PolicyName: PolicyDynamoDB
+                  PolicyDocument:
+                      Version: '2012-10-17'
+                      Statement:
+                          - Effect: Allow
+                            Action:
+                                - dynamodb:*
+                            Resource:
+                                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${MyTable}
+
+    RoleAppSyncEventLambda:
+        Type: AWS::IAM::Role
+        Properties:
+            RoleName: !Sub ${APIName}-eventLambda-policy
+            AssumeRolePolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                    - Effect: Allow
+                      Action:
+                          - sts:AssumeRole
+                      Principal:
+                          Service:
+                              - appsync.amazonaws.com
+            Policies:
+                - PolicyName: !Sub ${APIName}-eventLambda-calllambda
+                  PolicyDocument:
+                      Version: '2012-10-17'
+                      Statement:
+                          - Effect: Allow
+                            Action:
+                                - lambda:*
+                            Resource:
+                                - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:*
+
+    # - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    # Appsync Resolvers
+    # - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    ResolverList:
+        Type: AWS::AppSync::Resolver
+        DependsOn: AppSyncSchema
+        Properties:
+            ApiId: !GetAtt AppSyncAPI.ApiId
+            TypeName: Query
+            FieldName: products
+            DataSourceName: !GetAtt AppSyncDataSourceDynamoDB.Name
+            RequestMappingTemplate: >
+                {
+                  "version": "2017-02-28",
+                  "operation" : "Query",
+                    "query" : {
+                        "expression" : "PK = :PK AND begins_with(SK, :SK)",
+                        "expressionValues" : {
+                            ":PK" : $util.dynamodb.toDynamoDBJson($ctx.args.PK),
+                            ":SK" : $util.dynamodb.toDynamoDBJson("product_")
+                        }
+                    }
+                }
+            ResponseMappingTemplate: $util.toJson($context.result.items)
+
+    ResolverCreate:
+        Type: AWS::AppSync::Resolver
+        Properties:
+            ApiId: !GetAtt AppSyncAPI.ApiId
+            TypeName: Mutation
+            FieldName: create
+            Kind: PIPELINE
+            PipelineConfig:
+                Functions:
+                    - !GetAtt WriteStatePipelineFunction.FunctionId
+                    - !GetAtt EmitEventPipelineFunction.FunctionId
+            RequestMappingTemplate: |
+                $util.qr($ctx.stash.put("PK", $ctx.args.storeId)) 
+                $util.qr($ctx.stash.put("SK", $util.str.toReplace("product_replace", "replace", $util.autoId())))  
+                $util.qr($ctx.stash.put("title", $ctx.args.title)) 
+                $util.qr($ctx.stash.put("category", $ctx.args.category)) 
+                $util.qr($ctx.stash.put("price", $ctx.args.price)) 
+                $util.qr($ctx.stash.put("type", $ctx.info.fieldName))
+                {}
+            ResponseMappingTemplate: |
+                $util.toJson($ctx.result)
+
+    ResolverRemove:
+        Type: AWS::AppSync::Resolver
+        Properties:
+            ApiId: !GetAtt AppSyncAPI.ApiId
+            TypeName: Mutation
+            FieldName: remove
+            Kind: PIPELINE
+            PipelineConfig:
+                Functions:
+                    - !GetAtt RemoveStatePipelineFunction.FunctionId
+                    - !GetAtt EmitEventPipelineFunction.FunctionId
+            RequestMappingTemplate: |
+                $util.qr($ctx.stash.put("PK", $ctx.args.PK))  
+                $util.qr($ctx.stash.put("SK", $ctx.args.SK))  
+                $util.qr($ctx.stash.put("type", $ctx.info.fieldName))
+                {}
+            ResponseMappingTemplate: |
+                $util.toJson($ctx.result)
+
+    # - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    # Pipeline Functions
+    # - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    WriteStatePipelineFunction:
+        Type: AWS::AppSync::FunctionConfiguration
+        Properties:
+            ApiId: !GetAtt AppSyncAPI.ApiId
+            FunctionVersion: '2018-05-29'
+            Name: WriteStatePipelineFunction
+            DataSourceName: !GetAtt AppSyncDataSourceDynamoDB.Name
+            RequestMappingTemplate: >
+                {
+                  "version": "2017-02-28",
+                  "operation": "PutItem",
+                  "key": {
+                    "PK" : $util.dynamodb.toDynamoDBJson($context.stash.PK),
+                    "SK" : $util.dynamodb.toDynamoDBJson($context.stash.SK)
+                  },
+                  "attributeValues" : $util.dynamodb.toMapValuesJson($context.stash)
+                }
+            ResponseMappingTemplate: $util.toJson($context.result)
+
+    RemoveStatePipelineFunction:
+        Type: AWS::AppSync::FunctionConfiguration
+        Properties:
+            ApiId: !GetAtt AppSyncAPI.ApiId
+            FunctionVersion: '2018-05-29'
+            Name: RemoveStatePipelineFunction
+            DataSourceName: !GetAtt AppSyncDataSourceDynamoDB.Name
+            RequestMappingTemplate: >
+                {
+                  "version": "2017-02-28",
+                  "operation": "DeleteItem",
+                  "key" : {
+                    "PK" : $util.dynamodb.toDynamoDBJson($context.stash.PK),
+                    "SK" : $util.dynamodb.toDynamoDBJson($context.stash.SK)
+                  }
+                }
+            ResponseMappingTemplate: $util.toJson($context.result)
+
+    EmitEventPipelineFunction:
+        Type: AWS::AppSync::FunctionConfiguration
+        Properties:
+            ApiId: !GetAtt AppSyncAPI.ApiId
+            FunctionVersion: '2018-05-29'
+            Name: EmitEventPipelineFunction
+            DataSourceName: !GetAtt AppSyncDataSourceEventsLambda.Name
+            RequestMappingTemplate: >
+                {
+                    "version": "2018-05-29",
+                    "operation": "Invoke",
+                    "payload": {
+                        "source": "custom.AppsyncCoffeeshopAdmin",
+                        "event": "product-updated",
+                        "data": {
+                            "PK": $util.toJson($context.stash.PK),
+                            "SK": $util.toJson($context.stash.SK),
+                            "type": $util.toJson($context.stash.type),
+                            "data": $util.toJson($context.stash)
+                        }
+                    }
+                }
+            ResponseMappingTemplate: $util.toJson($context.result)
+
+Outputs:
+    APIKey:
+        Description: API Key
+        Value: !GetAtt AppSyncAPIKey.ApiKey
+
+    GraphQL:
+        Description: GraphQL URL
+        Value: !GetAtt AppSyncAPI.GraphQLUrl

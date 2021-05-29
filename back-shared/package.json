@@ -1,0 +1,6 @@
+{
+  "scripts": {
+    "deploy": "sam build && sam deploy --region=us-east-2 --capabilities=CAPABILITY_NAMED_IAM",
+    "remove": "aws cloudformation delete-stack --stack-name=AppsyncCoffeeshopInfra  --region=us-east-2"
+  }
+}

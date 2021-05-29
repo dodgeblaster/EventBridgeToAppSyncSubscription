@@ -1,0 +1,6 @@
+{
+  "scripts": {
+    "deploy": "aws cloudformation deploy --stack-name=AppsyncCoffeeshopInventory --template-file=template.yml --capabilities=CAPABILITY_NAMED_IAM --parameter-overrides=\"APIName=AppsyncCoffeeshopInventory\" --region=us-east-2",
+    "remove": "aws cloudformation delete-stack --stack-name=AppsyncCoffeeshopInventory --region=us-east-2"
+  }
+}
